@@ -248,6 +248,16 @@ async function bootstrap() {
     secret: BETTER_AUTH_SECRET,
     baseURL: BETTER_AUTH_URL,
     trustedOrigins: [CLIENT_URL, BETTER_AUTH_URL, "http://localhost:3000", "http://localhost:5000"],
+    advanced: {
+      // Client (zeta.vercel.app) and API (blond.vercel.app) are different sites.
+      // Without SameSite=None, Google OAuth session cookies never reach /api/me.
+      defaultCookieAttributes: {
+        sameSite: IS_VERCEL ? "none" : "lax",
+        secure: IS_VERCEL ? true : false,
+        httpOnly: true,
+        path: "/",
+      },
+    },
     emailAndPassword: {
       enabled: true,
       minPasswordLength: 8,
@@ -258,7 +268,7 @@ async function bootstrap() {
             google: {
               clientId: process.env.GOOGLE_CLIENT_ID,
               clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-              // Must match Google Cloud Console → Authorized redirect URIs
+              // Must match Google Cloud Console → Authorized redirect URIs exactly
               redirectURI: `${BETTER_AUTH_URL}/api/auth/callback/google`,
             },
           },
