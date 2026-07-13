@@ -1338,27 +1338,69 @@ async function bootstrap() {
   });
 
   app.patch("/api/admin/reports/:id", requireAuth(["admin"]), async (req, res) => {
-    const action = req.body.action as "suspend" | "delete" | "resolve";
-    if (!ObjectId.isValid(req.params.id)) {
-      return res.status(400).json({ success: false, message: "Invalid id." });
-    }
-    const report = await reportsCol.findOne({ _id: new ObjectId(req.params.id) });
-    if (!report) return res.status(404).json({ success: false, message: "Report not found." });
+    try {
+      const parsed = z
+        .object({ action: z.enum(["suspend", "delete", "resolve"]) })
+        .safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Action must be one of: suspend, delete, resolve.",
+        });
+      }
+      const { action } = parsed.data;
 
-    if (action === "suspend") {
-      await campaignsCol.updateOne(
-        { _id: new ObjectId(report.campaign_id) },
-        { $set: { status: "suspended", updatedAt: new Date() } }
-      );
-      await reportsCol.updateOne({ _id: report._id }, { $set: { status: "suspended" } });
-    } else if (action === "delete") {
-      await campaignsCol.deleteOne({ _id: new ObjectId(report.campaign_id) });
-      await contributionsCol.deleteMany({ campaign_id: report.campaign_id });
+      if (!ObjectId.isValid(req.params.id)) {
+        return res.status(400).json({ success: false, message: "Invalid report id." });
+      }
+
+      const report = await reportsCol.findOne({ _id: new ObjectId(req.params.id) });
+      if (!report) {
+        return res.status(404).json({ success: false, message: "Report not found." });
+      }
+
+      const campaignObjectId = ObjectId.isValid(String(report.campaign_id))
+        ? new ObjectId(String(report.campaign_id))
+        : null;
+
+      if (action === "suspend") {
+        if (campaignObjectId) {
+          await campaignsCol.updateOne(
+            { _id: campaignObjectId },
+            { $set: { status: "suspended", updatedAt: new Date() } }
+          );
+        }
+        await reportsCol.updateOne({ _id: report._id }, { $set: { status: "suspended" } });
+        return res.json({
+          success: true,
+          message: campaignObjectId
+            ? "Campaign suspended and report updated."
+            : "Report marked suspended (campaign not found).",
+        });
+      }
+
+      if (action === "delete") {
+        if (campaignObjectId) {
+          await campaignsCol.deleteOne({ _id: campaignObjectId });
+          await contributionsCol.deleteMany({ campaign_id: String(report.campaign_id) });
+        }
+        // Remove the report from the queue so admin actions feel complete
+        await reportsCol.deleteOne({ _id: report._id });
+        return res.json({
+          success: true,
+          message: campaignObjectId
+            ? "Report and campaign deleted."
+            : "Report deleted (campaign was already missing).",
+        });
+      }
+
+      // resolve = dismiss without removing the campaign
       await reportsCol.updateOne({ _id: report._id }, { $set: { status: "resolved" } });
-    } else {
-      await reportsCol.updateOne({ _id: report._id }, { $set: { status: "resolved" } });
+      return res.json({ success: true, message: "Report marked as resolved." });
+    } catch (error) {
+      console.error("Report action failed:", error);
+      return res.status(500).json({ success: false, message: "Report action failed." });
     }
-    res.json({ success: true, message: `Report ${action}d.` });
   });
 
   // ——— Notifications ———
