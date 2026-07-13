@@ -441,12 +441,15 @@ async function bootstrap() {
   });
 
   // ——— Public campaigns ———
+  const publicCache = "public, s-maxage=30, stale-while-revalidate=120";
+
   app.get("/api/campaigns/top", async (_req, res) => {
     const campaigns = await campaignsCol
       .find({ status: "approved" })
       .sort({ amount_raised: -1 })
       .limit(6)
       .toArray();
+    res.setHeader("Cache-Control", publicCache);
     res.json({ success: true, campaigns: campaigns.map((c) => ({ ...c, momentum: momentumScore(c.amount_raised, c.funding_goal, c.deadline) })) });
   });
 
@@ -483,6 +486,7 @@ async function bootstrap() {
       .find(filter)
       .sort(sortMap[String(sort)] || { deadline: 1 })
       .toArray();
+    res.setHeader("Cache-Control", publicCache);
     res.json({ success: true, campaigns: campaigns.map((c) => ({ ...c, momentum: momentumScore(c.amount_raised, c.funding_goal, c.deadline) })) });
   });
 
@@ -494,6 +498,7 @@ async function bootstrap() {
     if (!campaign) {
       return res.status(404).json({ success: false, message: "Campaign not found." });
     }
+    res.setHeader("Cache-Control", publicCache);
     res.json({ success: true, campaign });
   });
 
@@ -506,6 +511,7 @@ async function bootstrap() {
       usersCol.countDocuments({ role: "supporter" }),
       usersCol.countDocuments({ role: "creator" }),
     ]);
+    res.setHeader("Cache-Control", publicCache);
     res.json({
       success: true,
       stats: {
