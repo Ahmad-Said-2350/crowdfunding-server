@@ -1413,7 +1413,7 @@ function ensureApp() {
   return bootPromise;
 }
 
-export default async function handler(req: any, res: any) {
+async function handler(req: any, res: any) {
   try {
     const app = await ensureApp();
     return app(req, res);
@@ -1425,6 +1425,10 @@ export default async function handler(req: any, res: any) {
     res.end(JSON.stringify({ success: false, message, code: "BOOTSTRAP_FAILED" }));
   }
 }
+
+// Vercel @vercel/node + CommonJS expects module.exports (not only export default)
+module.exports = handler;
+export default handler;
 
 if (!IS_VERCEL) {
   ensureApp().catch((err) => {
