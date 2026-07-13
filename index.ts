@@ -21,20 +21,16 @@ import { healthPayload } from "./health";
 const PORT = Number(process.env.PORT) || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
 const MONGODB_DB = process.env.MONGODB_DB || "fundora";
-const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000";
-const BETTER_AUTH_URL = process.env.BETTER_AUTH_URL || `http://localhost:${PORT}`;
+const CLIENT_URL = (process.env.CLIENT_URL || "http://localhost:3000").replace(/\/$/, "");
+const BETTER_AUTH_URL = (process.env.BETTER_AUTH_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
 const BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET || "dev-secret-change-me-in-production-32chars";
-
-if (!MONGODB_URI) {
-  console.error("Missing MONGODB_URI in environment variables.");
-  process.exit(1);
-}
+const IS_VERCEL = Boolean(process.env.VERCEL);
 
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
   : null;
 
-const client = new MongoClient(MONGODB_URI);
+let client: MongoClient;
 let db: Db;
 
 type Role = "supporter" | "creator" | "admin";
@@ -46,6 +42,9 @@ interface AppUser {
   email: string;
   emailVerified?: boolean;
   image?: string | null;
+  bio?: string;
+  phone?: string;
+  location?: string;
   createdAt?: Date;
   updatedAt?: Date;
   role: Role;
@@ -85,7 +84,7 @@ interface Contribution {
   creator_email: string;
   message?: string;
   current_date: Date;
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "rejected" | "canceled";
 }
 
 interface Withdrawal {
@@ -97,7 +96,7 @@ interface Withdrawal {
   payment_system: string;
   account_number: string;
   withdraw_date: Date;
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "rejected" | "canceled";
 }
 
 interface Payment {
@@ -109,7 +108,7 @@ interface Payment {
   package_label: string;
   stripe_session_id?: string;
   payment_system: string;
-  status: "pending" | "completed" | "failed";
+  status: "pending" | "completed" | "failed" | "canceled";
   createdAt: Date;
 }
 
@@ -195,6 +194,11 @@ function requireAuth(roles?: Role[]) {
 }
 
 async function bootstrap() {
+  if (!MONGODB_URI) {
+    throw new Error("Missing MONGODB_URI in environment variables.");
+  }
+
+  client = new MongoClient(MONGODB_URI);
   await client.connect();
   db = client.db(MONGODB_DB);
   console.log(`Connected to MongoDB - ${MONGODB_DB}`);
@@ -222,7 +226,7 @@ async function bootstrap() {
     database: mongodbAdapter(db, { client }),
     secret: BETTER_AUTH_SECRET,
     baseURL: BETTER_AUTH_URL,
-    trustedOrigins: [CLIENT_URL, BETTER_AUTH_URL],
+    trustedOrigins: [CLIENT_URL, BETTER_AUTH_URL, "http://localhost:3000", "http://localhost:5000"],
     emailAndPassword: {
       enabled: true,
       minPasswordLength: 8,
@@ -233,6 +237,8 @@ async function bootstrap() {
             google: {
               clientId: process.env.GOOGLE_CLIENT_ID,
               clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+              // Must match Google Cloud Console → Authorized redirect URIs
+              redirectURI: `${BETTER_AUTH_URL}/api/auth/callback/google`,
             },
           },
         }
@@ -296,13 +302,18 @@ async function bootstrap() {
   );
 
   // Block casual browser navigation on protected API routes (Accept: text/html)
+  // Always allow Better Auth OAuth callbacks (Google redirects here as a document GET).
   app.use("/api", (req, res, next) => {
+    const original = String(req.originalUrl || req.url || "");
+    if (original.includes("/api/auth") || req.path.startsWith("/auth")) {
+      return next();
+    }
     const accept = String(req.headers.accept || "");
     const isBrowserDocument =
       req.method === "GET" &&
       accept.includes("text/html") &&
       !accept.includes("application/json");
-    if (isBrowserDocument && req.path !== "/" && !req.path.startsWith("/auth")) {
+    if (isBrowserDocument && req.path !== "/") {
       return res.status(403).json({
         success: false,
         message: "Browser navigation blocked on protected API routes.",
@@ -340,10 +351,14 @@ async function bootstrap() {
         name: user.name,
         email: user.email,
         image: user.image,
+        bio: user.bio || "",
+        phone: user.phone || "",
+        location: user.location || "",
         role: user.role,
         credits: user.credits,
         raisedCredits: user.raisedCredits || 0,
         blocked: Boolean(user.blocked),
+        createdAt: user.createdAt || null,
       },
     });
   });
@@ -351,16 +366,47 @@ async function bootstrap() {
   app.patch("/api/me", requireAuth(), async (req, res) => {
     const user = (req as Request & { user: AppUser }).user;
     const schema = z.object({
-      name: z.string().min(2).optional(),
-      image: z.string().url().optional(),
+      name: z.string().trim().min(2).max(80).optional(),
+      image: z.string().url().optional().or(z.literal("")),
+      bio: z.string().trim().max(500).optional(),
+      phone: z.string().trim().max(30).optional(),
+      location: z.string().trim().max(120).optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ success: false, message: parsed.error.errors[0].message });
     }
-    await usersCol.updateOne({ email: user.email }, { $set: { ...parsed.data, updatedAt: new Date() } });
+
+    const updates: Record<string, unknown> = { updatedAt: new Date() };
+    if (parsed.data.name !== undefined) updates.name = parsed.data.name;
+    if (parsed.data.image !== undefined) updates.image = parsed.data.image || null;
+    if (parsed.data.bio !== undefined) updates.bio = parsed.data.bio;
+    if (parsed.data.phone !== undefined) updates.phone = parsed.data.phone;
+    if (parsed.data.location !== undefined) updates.location = parsed.data.location;
+
+    await usersCol.updateOne({ email: user.email }, { $set: updates });
     const updated = await usersCol.findOne({ email: user.email });
-    res.json({ success: true, user: updated });
+    if (!updated) {
+      return res.status(404).json({ success: false, message: "User not found." });
+    }
+
+    res.json({
+      success: true,
+      user: {
+        id: updated._id?.toString(),
+        name: updated.name,
+        email: updated.email,
+        image: updated.image,
+        bio: updated.bio || "",
+        phone: updated.phone || "",
+        location: updated.location || "",
+        role: updated.role,
+        credits: updated.credits,
+        raisedCredits: updated.raisedCredits || 0,
+        blocked: Boolean(updated.blocked),
+        createdAt: updated.createdAt || null,
+      },
+    });
   });
 
   // ——— Public campaigns ———
@@ -879,6 +925,138 @@ async function bootstrap() {
     res.json({ success: true, payments });
   });
 
+  // Cancel pending credit purchase (supporter) or admin override
+  app.patch("/api/payments/:id/cancel", requireAuth(["supporter", "admin"]), async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid payment id." });
+    }
+    const user = (req as Request & { user: AppUser }).user;
+    const payment = await paymentsCol.findOne({ _id: new ObjectId(req.params.id) });
+    if (!payment) return res.status(404).json({ success: false, message: "Payment not found." });
+    if (user.role !== "admin" && payment.user_email !== user.email) {
+      return res.status(403).json({ success: false, message: "Forbidden." });
+    }
+    if (payment.status !== "pending") {
+      return res.status(400).json({ success: false, message: "Only pending payments can be canceled." });
+    }
+    await paymentsCol.updateOne({ _id: payment._id }, { $set: { status: "canceled" } });
+    res.json({ success: true, message: "Payment canceled." });
+  });
+
+  // Admin payment control center
+  app.get("/api/admin/payments", requireAuth(["admin"]), async (_req, res) => {
+    const payments = await paymentsCol.find({}).sort({ createdAt: -1 }).limit(200).toArray();
+    res.json({ success: true, payments });
+  });
+
+  app.patch("/api/admin/payments/:id/status", requireAuth(["admin"]), async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid payment id." });
+    }
+    const status = req.body.status as "completed" | "canceled" | "failed";
+    if (!["completed", "canceled", "failed"].includes(status)) {
+      return res.status(400).json({ success: false, message: "Invalid status." });
+    }
+    const payment = await paymentsCol.findOne({ _id: new ObjectId(req.params.id) });
+    if (!payment) return res.status(404).json({ success: false, message: "Payment not found." });
+
+    if (status === "completed" && payment.status !== "completed") {
+      await paymentsCol.updateOne({ _id: payment._id }, { $set: { status: "completed" } });
+      await usersCol.updateOne({ email: payment.user_email }, { $inc: { credits: payment.credits } });
+      await createNotification({
+        message: `Admin confirmed your purchase of ${payment.credits} credits.`,
+        toEmail: payment.user_email,
+        actionRoute: "/dashboard/payment-history",
+      });
+    } else if ((status === "canceled" || status === "failed") && payment.status === "pending") {
+      await paymentsCol.updateOne({ _id: payment._id }, { $set: { status } });
+    } else if ((status === "canceled" || status === "failed") && payment.status === "completed") {
+      // Reverse completed payment: claw back credits if possible
+      const holder = await usersCol.findOne({ email: payment.user_email });
+      if (!holder || (holder.credits || 0) < payment.credits) {
+        return res.status(400).json({
+          success: false,
+          message: "Cannot reverse: user no longer has enough credits.",
+        });
+      }
+      await usersCol.updateOne({ email: payment.user_email }, { $inc: { credits: -payment.credits } });
+      await paymentsCol.updateOne({ _id: payment._id }, { $set: { status } });
+      await createNotification({
+        message: `Admin reversed your purchase of ${payment.credits} credits (${status}).`,
+        toEmail: payment.user_email,
+        actionRoute: "/dashboard/payment-history",
+      });
+    } else {
+      return res.status(400).json({ success: false, message: `Cannot change ${payment.status} to ${status}.` });
+    }
+
+    const updated = await paymentsCol.findOne({ _id: payment._id });
+    res.json({ success: true, payment: updated });
+  });
+
+  // Creator cancels pending withdrawal
+  app.patch("/api/withdrawals/:id/cancel", requireAuth(["creator", "admin"]), async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid withdrawal id." });
+    }
+    const user = (req as Request & { user: AppUser }).user;
+    const withdrawal = await withdrawalsCol.findOne({ _id: new ObjectId(req.params.id) });
+    if (!withdrawal) return res.status(404).json({ success: false, message: "Withdrawal not found." });
+    if (user.role !== "admin" && withdrawal.creator_email !== user.email) {
+      return res.status(403).json({ success: false, message: "Forbidden." });
+    }
+    if (withdrawal.status !== "pending") {
+      return res.status(400).json({ success: false, message: "Only pending withdrawals can be canceled." });
+    }
+    await withdrawalsCol.updateOne({ _id: withdrawal._id }, { $set: { status: "canceled" } });
+    res.json({ success: true, message: "Withdrawal canceled." });
+  });
+
+  // Admin reject withdrawal
+  app.patch("/api/admin/withdrawals/:id/reject", requireAuth(["admin"]), async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid id." });
+    }
+    const withdrawal = await withdrawalsCol.findOne({ _id: new ObjectId(req.params.id) });
+    if (!withdrawal || withdrawal.status !== "pending") {
+      return res.status(400).json({ success: false, message: "Pending withdrawal not found." });
+    }
+    await withdrawalsCol.updateOne({ _id: withdrawal._id }, { $set: { status: "rejected" } });
+    await createNotification({
+      message: `Your withdrawal of ${withdrawal.withdrawal_credit} credits was rejected by Admin.`,
+      toEmail: withdrawal.creator_email,
+      actionRoute: "/dashboard/payment-history",
+    });
+    res.json({ success: true, message: "Withdrawal rejected." });
+  });
+
+  // Supporter cancels pending contribution
+  app.patch("/api/contributions/:id/cancel", requireAuth(["supporter", "admin"]), async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid contribution id." });
+    }
+    const user = (req as Request & { user: AppUser }).user;
+    const contribution = await contributionsCol.findOne({ _id: new ObjectId(req.params.id) });
+    if (!contribution) return res.status(404).json({ success: false, message: "Contribution not found." });
+    if (user.role !== "admin" && contribution.supporter_email !== user.email) {
+      return res.status(403).json({ success: false, message: "Forbidden." });
+    }
+    if (contribution.status !== "pending") {
+      return res.status(400).json({ success: false, message: "Only pending contributions can be canceled." });
+    }
+    await contributionsCol.updateOne({ _id: contribution._id }, { $set: { status: "canceled" } });
+    await usersCol.updateOne(
+      { email: contribution.supporter_email },
+      { $inc: { credits: contribution.contribution_amount } }
+    );
+    await createNotification({
+      message: `${contribution.supporter_name} canceled a pending contribution to ${contribution.campaign_title}.`,
+      toEmail: contribution.creator_email,
+      actionRoute: "/dashboard/creator-home",
+    });
+    res.json({ success: true, message: "Contribution canceled and credits refunded." });
+  });
+
   // ——— Admin ———
   app.get("/api/admin/home", requireAuth(["admin"]), async (_req, res) => {
     const [supporters, creators, creditsAgg, paymentsProcessed] = await Promise.all([
@@ -901,8 +1079,8 @@ async function bootstrap() {
   });
 
   app.patch("/api/admin/campaigns/:id/status", requireAuth(["admin"]), async (req, res) => {
-    const status = req.body.status as "approved" | "rejected";
-    if (!["approved", "rejected"].includes(status)) {
+    const status = req.body.status as "approved" | "rejected" | "suspended" | "pending";
+    if (!["approved", "rejected", "suspended", "pending"].includes(status)) {
       return res.status(400).json({ success: false, message: "Invalid status." });
     }
     if (!ObjectId.isValid(req.params.id)) {
@@ -911,15 +1089,49 @@ async function bootstrap() {
     const campaign = await campaignsCol.findOne({ _id: new ObjectId(req.params.id) });
     if (!campaign) return res.status(404).json({ success: false, message: "Not found." });
     await campaignsCol.updateOne({ _id: campaign._id }, { $set: { status, updatedAt: new Date() } });
+    const messages: Record<string, string> = {
+      approved: `Your campaign "${campaign.campaign_title}" was approved by Admin and is now live.`,
+      rejected: `Your campaign "${campaign.campaign_title}" was rejected by Admin.`,
+      suspended: `Your campaign "${campaign.campaign_title}" was suspended by Admin.`,
+      pending: `Your campaign "${campaign.campaign_title}" was moved back to pending review.`,
+    };
     await createNotification({
-      message:
-        status === "approved"
-          ? `Your campaign "${campaign.campaign_title}" was approved by Admin and is now live.`
-          : `Your campaign "${campaign.campaign_title}" was rejected by Admin.`,
+      message: messages[status],
       toEmail: campaign.creator_email,
       actionRoute: "/dashboard/my-campaigns",
     });
     res.json({ success: true, message: `Campaign ${status}.` });
+  });
+
+  app.patch("/api/admin/campaigns/:id", requireAuth(["admin"]), async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid id." });
+    }
+    const schema = z.object({
+      campaign_title: z.string().min(3).max(120).optional(),
+      campaign_story: z.string().min(20).optional(),
+      category: z.string().min(2).optional(),
+      funding_goal: z.number().positive().optional(),
+      minimum_contribution: z.number().positive().optional(),
+      reward_info: z.string().min(2).optional(),
+      deadline: z.string().datetime().or(z.string().min(8)).optional(),
+      status: z.enum(["pending", "approved", "rejected", "suspended"]).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ success: false, message: parsed.error.errors[0].message });
+    }
+    const campaign = await campaignsCol.findOne({ _id: new ObjectId(req.params.id) });
+    if (!campaign) return res.status(404).json({ success: false, message: "Not found." });
+
+    const updates: Record<string, unknown> = { updatedAt: new Date() };
+    for (const [key, value] of Object.entries(parsed.data)) {
+      if (value === undefined) continue;
+      updates[key] = key === "deadline" ? new Date(String(value)) : value;
+    }
+    await campaignsCol.updateOne({ _id: campaign._id }, { $set: updates });
+    const updated = await campaignsCol.findOne({ _id: campaign._id });
+    res.json({ success: true, campaign: updated });
   });
 
   app.get("/api/admin/withdrawals", requireAuth(["admin"]), async (_req, res) => {
@@ -1176,12 +1388,36 @@ async function bootstrap() {
     res.status(500).json({ success: false, message: "Internal server error." });
   });
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Pledgekit server running on port ${PORT}`);
-  });
+  if (!IS_VERCEL) {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Pledgekit server running on port ${PORT}`);
+    });
+  }
+
+  return app;
 }
 
-bootstrap().catch((err) => {
-  console.error("Failed to start server:", err);
-  process.exit(1);
-});
+type ExpressApp = Awaited<ReturnType<typeof bootstrap>>;
+let bootPromise: Promise<ExpressApp> | null = null;
+
+function ensureApp() {
+  if (!bootPromise) {
+    bootPromise = bootstrap().catch((err) => {
+      bootPromise = null;
+      throw err;
+    });
+  }
+  return bootPromise;
+}
+
+export default async function handler(req: any, res: any) {
+  const app = await ensureApp();
+  return app(req, res);
+}
+
+if (!IS_VERCEL) {
+  ensureApp().catch((err) => {
+    console.error("Failed to start server:", err);
+    process.exit(1);
+  });
+}

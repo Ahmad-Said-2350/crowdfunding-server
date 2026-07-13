@@ -3,7 +3,24 @@
   "builds": [
     {
       "src": "index.ts",
-      "use": "@vercel/node"
+      "use": "@vercel/node",
+      "config": {
+        "maxDuration": 60,
+        "includeFiles": [
+          "constants.ts",
+          "insights.ts",
+          "health.ts",
+          "roles.ts",
+          "statuses.ts",
+          "money.ts",
+          "dates.ts",
+          "category.ts",
+          "response.ts",
+          "password.ts",
+          "pagination.ts",
+          "rateLimitNotes.ts"
+        ]
+      }
     }
   ],
   "routes": [
