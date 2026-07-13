@@ -51,6 +51,9 @@ interface AppUser {
   role: Role;
   credits: number;
   raisedCredits: number;
+  blocked?: boolean;
+  blockedReason?: string;
+  blockedAt?: Date | null;
 }
 
 interface Campaign {
@@ -172,6 +175,13 @@ function requireAuth(roles?: Role[]) {
       if (!user) {
         return res.status(401).json({ success: false, message: "Unauthorized. Please log in." });
       }
+      if (user.blocked) {
+        return res.status(403).json({
+          success: false,
+          message: user.blockedReason || "Your account has been blocked by Pledgekit administrators.",
+          code: "ACCOUNT_BLOCKED",
+        });
+      }
       if (roles && !roles.includes(user.role)) {
         return res.status(403).json({ success: false, message: "Forbidden for this role." });
       }
@@ -188,6 +198,7 @@ async function bootstrap() {
   await client.connect();
   db = client.db(MONGODB_DB);
   console.log(`Connected to MongoDB - ${MONGODB_DB}`);
+  console.log("Pledgekit API online");
 
   usersCol = db.collection<AppUser>("user");
   campaignsCol = db.collection<Campaign>("campaigns");
@@ -332,6 +343,7 @@ async function bootstrap() {
         role: user.role,
         credits: user.credits,
         raisedCredits: user.raisedCredits || 0,
+        blocked: Boolean(user.blocked),
       },
     });
   });
@@ -942,10 +954,58 @@ async function bootstrap() {
 
   app.get("/api/admin/users", requireAuth(["admin"]), async (_req, res) => {
     const users = await usersCol
-      .find({}, { projection: { name: 1, email: 1, image: 1, role: 1, credits: 1, raisedCredits: 1, createdAt: 1 } })
+      .find(
+        {},
+        {
+          projection: {
+            name: 1,
+            email: 1,
+            image: 1,
+            role: 1,
+            credits: 1,
+            raisedCredits: 1,
+            createdAt: 1,
+            blocked: 1,
+            blockedReason: 1,
+            blockedAt: 1,
+          },
+        }
+      )
       .sort({ createdAt: -1 })
       .toArray();
     res.json({ success: true, users });
+  });
+
+  app.patch("/api/admin/users/:email/block", requireAuth(["admin"]), async (req, res) => {
+    const email = decodeURIComponent(req.params.email);
+    if (email === process.env.ADMIN_EMAIL) {
+      return res.status(400).json({ success: false, message: "Cannot block the primary admin." });
+    }
+    const blocked = Boolean(req.body.blocked);
+    const blockedReason = String(req.body.reason || "").trim();
+    if (blocked && blockedReason.length < 5) {
+      return res.status(400).json({ success: false, message: "Provide a clear reason (min 5 characters)." });
+    }
+    const result = await usersCol.updateOne(
+      { email },
+      {
+        $set: {
+          blocked,
+          blockedReason: blocked ? blockedReason : "",
+          blockedAt: blocked ? new Date() : null,
+          updatedAt: new Date(),
+        },
+      }
+    );
+    if (!result.matchedCount) return res.status(404).json({ success: false, message: "User not found." });
+    await createNotification({
+      message: blocked
+        ? `Your Pledgekit account was blocked. Reason: ${blockedReason}`
+        : "Your Pledgekit account has been unblocked. You can use the platform again.",
+      toEmail: email,
+      actionRoute: "/dashboard",
+    });
+    res.json({ success: true, message: blocked ? "User blocked." : "User unblocked." });
   });
 
   app.patch("/api/admin/users/:email/role", requireAuth(["admin"]), async (req, res) => {
@@ -1117,7 +1177,7 @@ async function bootstrap() {
   });
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Fundora server running on port ${PORT}`);
+    console.log(`Pledgekit server running on port ${PORT}`);
   });
 }
 
