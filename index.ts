@@ -9,14 +9,32 @@ import { toNodeHandler, fromNodeHeaders } from "better-auth/node";
 import { jwt } from "better-auth/plugins";
 import Stripe from "stripe";
 import { z } from "zod";
-import {
-  CREDIT_PACKAGES,
-  REGISTRATION_CREDITS,
-  WITHDRAW_CREDITS_PER_DOLLAR,
-  MIN_WITHDRAWAL_CREDITS,
-} from "./constants";
-import { momentumScore } from "./insights";
-import { healthPayload } from "./health";
+
+const CREDIT_PACKAGES = {
+  "100": { credits: 100, price: 10, label: "100 credits" },
+  "300": { credits: 300, price: 25, label: "300 credits" },
+  "800": { credits: 800, price: 60, label: "800 credits" },
+  "1500": { credits: 1500, price: 110, label: "1500 credits" },
+} as const;
+
+const REGISTRATION_CREDITS = {
+  supporter: 50,
+  creator: 20,
+  admin: 0,
+} as const;
+
+const WITHDRAW_CREDITS_PER_DOLLAR = 20;
+const MIN_WITHDRAWAL_CREDITS = 200;
+
+function momentumScore(amountRaised: number, fundingGoal: number, deadline: Date): number {
+  const progress = fundingGoal > 0 ? amountRaised / fundingGoal : 0;
+  const daysLeft = Math.max(1, (deadline.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+  return Number((progress * 100 + Math.min(30, 30 / daysLeft)).toFixed(2));
+}
+
+function healthPayload() {
+  return { ok: true, service: "pledgekit-api", time: new Date().toISOString() };
+}
 
 const PORT = Number(process.env.PORT) || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
