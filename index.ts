@@ -40,9 +40,11 @@ const PORT = Number(process.env.PORT) || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
 const MONGODB_DB = process.env.MONGODB_DB || "fundora";
 const CLIENT_URL = (process.env.CLIENT_URL || "http://localhost:3000").replace(/\/$/, "");
-const BETTER_AUTH_URL = (process.env.BETTER_AUTH_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
+// Prefer same-origin auth via the Next.js proxy (CLIENT_URL). Falls back to API host for local API-only use.
+const BETTER_AUTH_URL = (process.env.BETTER_AUTH_URL || CLIENT_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
 const BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET || "dev-secret-change-me-in-production-32chars";
 const IS_VERCEL = Boolean(process.env.VERCEL);
+const SAME_SITE_AUTH = BETTER_AUTH_URL === CLIENT_URL;
 
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
@@ -249,11 +251,11 @@ async function bootstrap() {
     baseURL: BETTER_AUTH_URL,
     trustedOrigins: [CLIENT_URL, BETTER_AUTH_URL, "http://localhost:3000", "http://localhost:5000"],
     advanced: {
-      // Client (zeta.vercel.app) and API (blond.vercel.app) are different sites.
-      // Without SameSite=None, Google OAuth session cookies never reach /api/me.
+      // When BETTER_AUTH_URL === CLIENT_URL (Next.js auth proxy), cookies are first-party → Lax.
+      // Only use None when auth is hosted on a different site than the UI.
       defaultCookieAttributes: {
-        sameSite: IS_VERCEL ? "none" : "lax",
-        secure: IS_VERCEL ? true : false,
+        sameSite: SAME_SITE_AUTH ? "lax" : IS_VERCEL ? "none" : "lax",
+        secure: IS_VERCEL || BETTER_AUTH_URL.startsWith("https"),
         httpOnly: true,
         path: "/",
       },
@@ -268,7 +270,7 @@ async function bootstrap() {
             google: {
               clientId: process.env.GOOGLE_CLIENT_ID,
               clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-              // Must match Google Cloud Console → Authorized redirect URIs exactly
+              // Google Cloud Console → Authorized redirect URIs must match this exactly
               redirectURI: `${BETTER_AUTH_URL}/api/auth/callback/google`,
             },
           },
