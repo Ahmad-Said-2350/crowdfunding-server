@@ -5,11 +5,13 @@ import { mongodbAdapter } from "better-auth/adapters/mongodb";
 
 async function seed() {
   const uri = process.env.MONGODB_URI;
+  const dbName = process.env.MONGODB_DB || "fundora";
   if (!uri) throw new Error("MONGODB_URI required");
 
   const client = new MongoClient(uri);
   await client.connect();
-  const db = client.db();
+  const db = client.db(dbName);
+  console.log(`Seeding database: ${dbName}`);
 
   const email = process.env.ADMIN_EMAIL || "admin@fundora.app";
   const password = process.env.ADMIN_PASSWORD || "Admin@Fundora2026";

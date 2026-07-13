@@ -1,3 +1,6 @@
+const dns = require("node:dns");
+dns.setServers(["8.8.8.8", "8.8.4.4"]);
+
 import "dotenv/config";
 import cors from "cors";
 import express, { Request, Response, NextFunction } from "express";
@@ -18,6 +21,7 @@ import { momentumScore } from "./insights";
 
 const PORT = Number(process.env.PORT) || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
+const MONGODB_DB = process.env.MONGODB_DB || "fundora";
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000";
 const BETTER_AUTH_URL = process.env.BETTER_AUTH_URL || `http://localhost:${PORT}`;
 const BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET || "dev-secret-change-me-in-production-32chars";
@@ -183,7 +187,8 @@ function requireAuth(roles?: Role[]) {
 
 async function bootstrap() {
   await client.connect();
-  db = client.db();
+  db = client.db(MONGODB_DB);
+  console.log(`Connected to MongoDB database: ${MONGODB_DB}`);
 
   usersCol = db.collection<AppUser>("user");
   campaignsCol = db.collection<Campaign>("campaigns");
