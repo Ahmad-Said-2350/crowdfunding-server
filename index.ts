@@ -8,6 +8,13 @@ import { toNodeHandler, fromNodeHeaders } from "better-auth/node";
 import { jwt } from "better-auth/plugins";
 import Stripe from "stripe";
 import { z } from "zod";
+import {
+  CREDIT_PACKAGES,
+  REGISTRATION_CREDITS,
+  WITHDRAW_CREDITS_PER_DOLLAR,
+  MIN_WITHDRAWAL_CREDITS,
+} from "./constants";
+import { momentumScore } from "./insights";
 
 const PORT = Number(process.env.PORT) || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -128,12 +135,10 @@ let paymentsCol: Collection<Payment>;
 let notificationsCol: Collection<Notification>;
 let reportsCol: Collection<Report>;
 
-export let auth: ReturnType<typeof betterAuth>;
+export let auth: ReturnType<typeof betterAuth> | undefined;
 
 function defaultCredits(role: Role): number {
-  if (role === "supporter") return 50;
-  if (role === "creator") return 20;
-  return 0;
+  return REGISTRATION_CREDITS[role];
 }
 
 async function createNotification(payload: Omit<Notification, "_id" | "read" | "time"> & { time?: Date }) {
@@ -147,6 +152,7 @@ async function createNotification(payload: Omit<Notification, "_id" | "read" | "
 }
 
 async function getSessionUser(req: Request): Promise<AppUser | null> {
+  if (!auth) return null;
   const session = await auth.api.getSession({
     headers: fromNodeHeaders(req.headers),
   });
@@ -174,13 +180,6 @@ function requireAuth(roles?: Role[]) {
     }
   };
 }
-
-const CREDIT_PACKAGES: Record<string, { credits: number; price: number; label: string }> = {
-  "100": { credits: 100, price: 10, label: "100 credits" },
-  "300": { credits: 300, price: 25, label: "300 credits" },
-  "800": { credits: 800, price: 60, label: "800 credits" },
-  "1500": { credits: 1500, price: 110, label: "1500 credits" },
-};
 
 async function bootstrap() {
   await client.connect();
@@ -249,13 +248,16 @@ async function bootstrap() {
       user: {
         create: {
           before: async (user) => {
-            const role = ((user as AppUser).role || "supporter") as Role;
-            const validRole: Role = ["supporter", "creator", "admin"].includes(role) ? role : "supporter";
+            const rawRole = String((user as Record<string, unknown>).role || "supporter");
+            const validRole: Role = ["supporter", "creator", "admin"].includes(rawRole)
+              ? (rawRole as Role)
+              : "supporter";
+            const assigned = validRole === "admin" ? "supporter" : validRole;
             return {
               data: {
                 ...user,
-                role: validRole === "admin" ? "supporter" : validRole,
-                credits: defaultCredits(validRole === "admin" ? "supporter" : validRole),
+                role: assigned,
+                credits: defaultCredits(assigned),
                 raisedCredits: 0,
               },
             };
@@ -264,7 +266,8 @@ async function bootstrap() {
       },
     },
     plugins: [jwt()],
-  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as any;
 
   const app = express();
 
@@ -277,7 +280,7 @@ async function bootstrap() {
     })
   );
 
-  app.all("/api/auth/*", toNodeHandler(auth));
+  app.all("/api/auth/*", toNodeHandler(auth!));
 
   app.use(express.json({ limit: "2mb" }));
 
@@ -333,7 +336,7 @@ async function bootstrap() {
       .sort({ amount_raised: -1 })
       .limit(6)
       .toArray();
-    res.json({ success: true, campaigns });
+    res.json({ success: true, campaigns: campaigns.map((c) => ({ ...c, momentum: momentumScore(c.amount_raised, c.funding_goal, c.deadline) })) });
   });
 
   app.get("/api/campaigns/explore", async (req, res) => {
@@ -369,7 +372,7 @@ async function bootstrap() {
       .find(filter)
       .sort(sortMap[String(sort)] || { deadline: 1 })
       .toArray();
-    res.json({ success: true, campaigns });
+    res.json({ success: true, campaigns: campaigns.map((c) => ({ ...c, momentum: momentumScore(c.amount_raised, c.funding_goal, c.deadline) })) });
   });
 
   app.get("/api/campaigns/:id", async (req, res) => {
@@ -449,7 +452,7 @@ async function bootstrap() {
       .find({ creator_email: user.email })
       .sort({ deadline: -1 })
       .toArray();
-    res.json({ success: true, campaigns });
+    res.json({ success: true, campaigns: campaigns.map((c) => ({ ...c, momentum: momentumScore(c.amount_raised, c.funding_goal, c.deadline) })) });
   });
 
   app.patch("/api/campaigns/:id", requireAuth(["creator", "admin"]), async (req, res) => {
@@ -679,8 +682,8 @@ async function bootstrap() {
     res.json({
       success: true,
       raisedCredits,
-      withdrawableDollars: raisedCredits / 20,
-      canWithdraw: raisedCredits >= 200,
+      withdrawableDollars: raisedCredits / WITHDRAW_CREDITS_PER_DOLLAR,
+      canWithdraw: raisedCredits >= MIN_WITHDRAWAL_CREDITS,
     });
   });
 
@@ -697,21 +700,21 @@ async function bootstrap() {
     }
     const fresh = await usersCol.findOne({ email: user.email });
     const raisedCredits = fresh?.raisedCredits || 0;
-    if (raisedCredits < 200) {
-      return res.status(400).json({ success: false, message: "Minimum 200 credits required to withdraw." });
+    if (raisedCredits < MIN_WITHDRAWAL_CREDITS) {
+      return res.status(400).json({ success: false, message: `Minimum ${MIN_WITHDRAWAL_CREDITS} credits required to withdraw.` });
     }
     if (parsed.data.withdrawal_credit > raisedCredits) {
       return res.status(400).json({ success: false, message: "Insufficient raised credits." });
     }
-    if (parsed.data.withdrawal_credit < 200) {
-      return res.status(400).json({ success: false, message: "Minimum withdrawal is 200 credits." });
+    if (parsed.data.withdrawal_credit < MIN_WITHDRAWAL_CREDITS) {
+      return res.status(400).json({ success: false, message: `Minimum withdrawal is ${MIN_WITHDRAWAL_CREDITS} credits.` });
     }
 
     const withdrawal: Withdrawal = {
       creator_email: user.email,
       creator_name: user.name,
       withdrawal_credit: parsed.data.withdrawal_credit,
-      withdrawal_amount: parsed.data.withdrawal_credit / 20,
+      withdrawal_amount: parsed.data.withdrawal_credit / WITHDRAW_CREDITS_PER_DOLLAR,
       payment_system: parsed.data.payment_system,
       account_number: parsed.data.account_number,
       withdraw_date: new Date(),
@@ -733,7 +736,7 @@ async function bootstrap() {
   // ——— Payments (credits) ———
   app.post("/api/payments/create-checkout", requireAuth(["supporter", "admin"]), async (req, res) => {
     const user = (req as Request & { user: AppUser }).user;
-    const packageKey = String(req.body.packageKey || "");
+    const packageKey = String(req.body.packageKey || "") as keyof typeof CREDIT_PACKAGES;
     const pkg = CREDIT_PACKAGES[packageKey];
     if (!pkg) {
       return res.status(400).json({ success: false, message: "Invalid credit package." });
@@ -946,7 +949,7 @@ async function bootstrap() {
 
   app.get("/api/admin/campaigns", requireAuth(["admin"]), async (_req, res) => {
     const campaigns = await campaignsCol.find({}).sort({ createdAt: -1 }).toArray();
-    res.json({ success: true, campaigns });
+    res.json({ success: true, campaigns: campaigns.map((c) => ({ ...c, momentum: momentumScore(c.amount_raised, c.funding_goal, c.deadline) })) });
   });
 
   app.delete("/api/admin/campaigns/:id", requireAuth(["admin"]), async (req, res) => {
