@@ -39,9 +39,10 @@ function healthPayload() {
 const PORT = Number(process.env.PORT) || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
 const MONGODB_DB = process.env.MONGODB_DB || "fundora";
-const CLIENT_URL = (process.env.CLIENT_URL || "http://localhost:3000").replace(/\/$/, "");
-// Prefer same-origin auth via the Next.js proxy (CLIENT_URL). Falls back to API host for local API-only use.
-const BETTER_AUTH_URL = (process.env.BETTER_AUTH_URL || CLIENT_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
+const CLIENT_URL = (process.env.CLIENT_URL || "http://localhost:3000").trim().replace(/\/$/, "") || "http://localhost:3000";
+// Empty string in Vercel env must not win over fallbacks
+const rawAuthUrl = (process.env.BETTER_AUTH_URL || "").trim().replace(/\/$/, "");
+const BETTER_AUTH_URL = rawAuthUrl || CLIENT_URL;
 const BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET || "dev-secret-change-me-in-production-32chars";
 const IS_VERCEL = Boolean(process.env.VERCEL);
 const SAME_SITE_AUTH = BETTER_AUTH_URL === CLIENT_URL;
@@ -371,7 +372,13 @@ async function bootstrap() {
   });
 
   app.get("/health", (_req, res) => {
-    res.json(healthPayload());
+    res.json({
+      ...healthPayload(),
+      authBase: BETTER_AUTH_URL,
+      clientUrl: CLIENT_URL,
+      sameSiteAuth: SAME_SITE_AUTH,
+      googleRedirect: `${BETTER_AUTH_URL}/api/auth/callback/google`,
+    });
   });
 
   // ——— Session / profile ———
