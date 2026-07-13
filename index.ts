@@ -1,5 +1,5 @@
 import dotenv from "dotenv";
-dotenv.config();
+dotenv.config({ quiet: true });
 import cors from "cors";
 import express, { Request, Response, NextFunction } from "express";
 import { MongoClient, ObjectId, Db, Collection } from "mongodb";
@@ -198,7 +198,10 @@ async function bootstrap() {
     throw new Error("Missing MONGODB_URI in environment variables.");
   }
 
-  client = new MongoClient(MONGODB_URI);
+  client = new MongoClient(MONGODB_URI, {
+    serverSelectionTimeoutMS: 10000,
+    maxPoolSize: 5,
+  });
   await client.connect();
   db = client.db(MONGODB_DB);
   console.log(`Connected to MongoDB - ${MONGODB_DB}`);
@@ -1411,8 +1414,16 @@ function ensureApp() {
 }
 
 export default async function handler(req: any, res: any) {
-  const app = await ensureApp();
-  return app(req, res);
+  try {
+    const app = await ensureApp();
+    return app(req, res);
+  } catch (err) {
+    console.error("Bootstrap failed:", err);
+    const message = err instanceof Error ? err.message : "Failed to start API";
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ success: false, message, code: "BOOTSTRAP_FAILED" }));
+  }
 }
 
 if (!IS_VERCEL) {
