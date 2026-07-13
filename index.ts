@@ -1,7 +1,5 @@
-const dns = require("node:dns");
-dns.setServers(["8.8.8.8", "8.8.4.4"]);
-
-import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config();
 import cors from "cors";
 import express, { Request, Response, NextFunction } from "express";
 import { MongoClient, ObjectId, Db, Collection } from "mongodb";
@@ -18,6 +16,7 @@ import {
   MIN_WITHDRAWAL_CREDITS,
 } from "./constants";
 import { momentumScore } from "./insights";
+import { healthPayload } from "./health";
 
 const PORT = Number(process.env.PORT) || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -188,7 +187,7 @@ function requireAuth(roles?: Role[]) {
 async function bootstrap() {
   await client.connect();
   db = client.db(MONGODB_DB);
-  console.log(`Connected to MongoDB database: ${MONGODB_DB}`);
+  console.log(`Connected to MongoDB - ${MONGODB_DB}`);
 
   usersCol = db.collection<AppUser>("user");
   campaignsCol = db.collection<Campaign>("campaigns");
@@ -285,9 +284,27 @@ async function bootstrap() {
     })
   );
 
+  // Block casual browser navigation on protected API routes (Accept: text/html)
+  app.use("/api", (req, res, next) => {
+    const accept = String(req.headers.accept || "");
+    const isBrowserDocument =
+      req.method === "GET" &&
+      accept.includes("text/html") &&
+      !accept.includes("application/json");
+    if (isBrowserDocument && req.path !== "/" && !req.path.startsWith("/auth")) {
+      return res.status(403).json({
+        success: false,
+        message: "Browser navigation blocked on protected API routes.",
+      });
+    }
+    next();
+  });
+
   app.all("/api/auth/*", toNodeHandler(auth!));
 
   app.use(express.json({ limit: "2mb" }));
+
+  console.log("Security v2: browser navigation blocked on protected API routes");
 
   app.get("/", (_req, res) => {
     res.json({
@@ -299,7 +316,7 @@ async function bootstrap() {
   });
 
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, time: new Date().toISOString() });
+    res.json(healthPayload());
   });
 
   // ——— Session / profile ———
@@ -1100,7 +1117,7 @@ async function bootstrap() {
   });
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Fundora API running on http://localhost:${PORT}`);
+    console.log(`Fundora server running on port ${PORT}`);
   });
 }
 

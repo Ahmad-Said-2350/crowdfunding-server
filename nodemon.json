@@ -1,0 +1,7 @@
+{
+  "watch": ["index.ts", "constants.ts", "insights.ts", "health.ts", "seed.ts"],
+  "ext": "ts,js,json",
+  "ignore": ["node_modules", "dist", "*.md"],
+  "exec": "tsx index.ts",
+  "delay": 500
+}
