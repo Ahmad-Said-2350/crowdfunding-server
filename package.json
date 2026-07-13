@@ -1,10 +1,11 @@
 {
   "name": "crowdfunding-server",
   "version": "1.0.0",
-  "description": "Fundora Crowdfunding Platform API",
+  "description": "Pledgekit Crowdfunding Platform API",
+  "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "predev": "node scripts/free-port.js",
+    "predev": "node scripts/free-port.cjs",
     "dev": "nodemon",
     "build": "tsc",
     "start": "node dist/index.js",
@@ -36,6 +37,6 @@
     "typescript": "^5.8.3"
   },
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   }
 }

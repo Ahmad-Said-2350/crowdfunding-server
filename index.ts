@@ -1426,8 +1426,6 @@ async function handler(req: any, res: any) {
   }
 }
 
-// Vercel @vercel/node + CommonJS expects module.exports (not only export default)
-module.exports = handler;
 export default handler;
 
 if (!IS_VERCEL) {
